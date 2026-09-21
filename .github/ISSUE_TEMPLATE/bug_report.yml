@@ -1,0 +1,61 @@
+name: Bug report
+description: Report something broken
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please write in English. The maintainers skim every report, and one in another language waits until someone translates it. Machine translation is fine.
+
+  - type: checkboxes
+    id: language
+    attributes:
+      label: Language
+      options:
+        - label: This report is written in English
+          required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What's wrong? Maybe some steps to reproduce.
+      description: What happened and what you expected.
+      placeholder: "Expected … but got …"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Where does it happen?
+      options:
+        - Desktop (macOS)
+        - Desktop Web
+        - Mobile (Web/PWA)
+        - VS Code extension
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Settings > About shows it.
+      placeholder: "e.g. 1.23.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / recordings (optional)
+      description: "Anything visual that helps."
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: "Paste relevant logs."
+      render: shell
