@@ -8,11 +8,11 @@ import { toast } from '@/components/ui';
 import { useSessionUIStore, type NewSessionDraftState } from '@/sync/session-ui-store';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { opencodeClient } from '@/lib/opencode/client';
 import { useContextStore } from '@/stores/contextStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { checkIsGitRepository, resolveGitPrimaryRoot, resolveGitRepositoryPrefix } from '@/lib/gitApi';
 import { generateBranchName } from '@/lib/git/branchNameGenerator';
-import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
 import {
@@ -118,74 +118,8 @@ let isCreatingWorktreeSession = false;
 
 
 
-const applyDefaultAgentAndModelSelection = (sessionId: string, configState = useConfigStore.getState()) => {
-  try {
-    const visibleAgents = configState.getVisibleAgents();
-    let agentName: string | undefined;
-
-    if (configState.settingsDefaultAgent) {
-      const settingsAgent = visibleAgents.find((a) => a.name === configState.settingsDefaultAgent);
-      if (settingsAgent) {
-        agentName = settingsAgent.name;
-      }
-    }
-
-    if (!agentName) {
-      agentName =
-        visibleAgents.find((agent) => agent.name === 'build')?.name ||
-        visibleAgents[0]?.name;
-    }
-
-    if (!agentName) {
-      return;
-    }
-
-    configState.setAgent(agentName);
-    useContextStore.getState().saveSessionAgentSelection(sessionId, agentName);
-
-    const settingsDefaultModel = configState.settingsDefaultModel;
-    if (!settingsDefaultModel) {
-      return;
-    }
-
-    const parsed = parseModelIdentifier(settingsDefaultModel);
-    if (!parsed) {
-      return;
-    }
-
-    const { providerId, modelId } = parsed;
-    const modelMetadata = configState.getModelMetadata(providerId, modelId);
-    if (!modelMetadata) {
-      return;
-    }
-
-    useContextStore.getState().saveSessionModelSelection(sessionId, providerId, modelId);
-    useContextStore.getState().saveAgentModelForSession(sessionId, agentName, providerId, modelId);
-
-    const settingsDefaultVariant = configState.settingsDefaultVariant;
-    if (!settingsDefaultVariant) {
-      return;
-    }
-
-    const provider = configState.providers.find((p) => p.id === providerId);
-    const model = provider?.models.find((m: Record<string, unknown>) => (m as { id?: string }).id === modelId) as
-      | { variants?: Record<string, unknown> }
-      | undefined;
-    const variants = model?.variants;
-
-    if (variants && Object.prototype.hasOwnProperty.call(variants, settingsDefaultVariant)) {
-      configState.setCurrentVariant(settingsDefaultVariant);
-      useContextStore
-        .getState()
-        .saveAgentModelVariantForSession(sessionId, agentName, providerId, modelId, settingsDefaultVariant);
-    }
-  } catch {
-    // Ignore errors setting default agent
-  }
-};
-
 /** `startDirectory` is where the session runs inside `metadata.path`; the worktree root stays the checkout. */
-const initializeSessionForWorktree = (sessionId: string, startDirectory: string, metadata: {
+const initializeSessionForWorktree = async (sessionId: string, startDirectory: string, metadata: {
   path: string;
   projectDirectory: string;
   branch: string;
@@ -199,8 +133,47 @@ const initializeSessionForWorktree = (sessionId: string, startDirectory: string,
   sessionStore.initializeNewOpenChamberSession(sessionId, configState.agents);
   sessionStore.setSessionDirectory(sessionId, startDirectory);
   sessionStore.setWorktreeMetadata(sessionId, metadata, startDirectory);
-  applyDefaultAgentAndModelSelection(sessionId, configState);
+  // Activate the config for the folder the session actually runs in before
+  // resolving its default model/agent, so directory overrides (project defaults
+  // and the OpenCode config in that folder) are honored instead of the
+  // previously active directory's selection.
   useDirectoryStore.getState().setDirectory(startDirectory, { showOverlay: false });
+  await useConfigStore.getState().activateDirectory(startDirectory);
+  // Fetch the folder's OpenCode config directly so its `model`/`default_agent`
+  // overrides are available even before sync has bootstrapped that child store.
+  const folderConfig = await opencodeClient.getConfig(startDirectory).catch(() => null);
+  if (folderConfig) {
+    useConfigStore.getState().applyOpenCodeConfigDefaults(startDirectory, 'manual', folderConfig);
+  }
+  const activatedConfig = useConfigStore.getState();
+  activatedConfig.applyDefaultModelAgentSelection();
+  const resolved = useConfigStore.getState();
+  // A cold directory's first agent read can answer empty, leaving the cascade
+  // unable to validate default_agent against the catalog. The folder config
+  // is authoritative for its own directory, so keep its raw default_agent
+  // rather than leaving the session without an agent.
+  const rawFolderDefaultAgent = folderConfig?.default_agent || undefined;
+  const sessionAgentName = resolved.currentAgentName
+    ?? (resolved.agents.length === 0 ? rawFolderDefaultAgent : undefined);
+  const contextStore = useContextStore.getState();
+  if (sessionAgentName) {
+    contextStore.saveSessionAgentSelection(sessionId, sessionAgentName);
+  }
+  if (resolved.currentProviderId && resolved.currentModelId) {
+    contextStore.saveSessionModelSelection(sessionId, resolved.currentProviderId, resolved.currentModelId);
+    if (sessionAgentName) {
+      contextStore.saveAgentModelForSession(sessionId, sessionAgentName, resolved.currentProviderId, resolved.currentModelId);
+      if (resolved.currentVariant) {
+        contextStore.saveAgentModelVariantForSession(
+          sessionId,
+          sessionAgentName,
+          resolved.currentProviderId,
+          resolved.currentModelId,
+          resolved.currentVariant,
+        );
+      }
+    }
+  }
 };
 
 
@@ -440,7 +413,7 @@ export async function createWorktreeSessionForNewBranch(
         throw new Error('Could not create a session for the worktree.');
       }
 
-      initializeSessionForWorktree(session.id, startDirectory, createdMetadata);
+      await initializeSessionForWorktree(session.id, startDirectory, createdMetadata);
 
       return { id: session.id, branch: metadata.branch || base, path: metadata.path, directory: startDirectory };
     } catch (error) {
